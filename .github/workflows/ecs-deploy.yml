@@ -1,0 +1,97 @@
+name: Deploy to ECS
+
+on:
+  workflow_dispatch: {}
+  push:
+    branches: [ "main" ]
+    paths:
+      - ".github/workflows/**"
+      - "**/*.py"
+      - "Dockerfile"
+      - "requirements.txt"
+
+env:
+  AWS_REGION: ${{ secrets.AWS_REGION }}
+  AWS_ACCOUNT_ID: ${{ secrets.AWS_ACCOUNT_ID }}
+  ECR_REPOSITORY: ${{ secrets.ECR_REPOSITORY }}
+  ECS_CLUSTER: ${{ secrets.ECS_CLUSTER }}
+  ECS_SERVICE: ${{ secrets.ECS_SERVICE }}
+  ECS_TASK_FAMILY: ${{ secrets.ECS_TASK_FAMILY }}
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout source
+        uses: actions/checkout@v4
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Login to Amazon ECR
+        id: login-ecr
+        uses: aws-actions/amazon-ecr-login@v2
+
+      - name: Set image tag
+        id: vars
+        run: echo "IMAGE_TAG=${GITHUB_SHA}" >> $GITHUB_OUTPUT
+
+      - name: Get existing task definition
+        id: describe-task-def
+        run: |
+          aws ecs describe-task-definition \
+            --task-definition $ECS_TASK_FAMILY \
+            --query 'taskDefinition' > task-def.json
+
+      - name: Create new task definition revision with updated image
+        id: register-task-def
+        run: |
+          NEW_IMAGE="$AWS_ACCOUNT_ID.dkr.ecr.$AWS_REGION.amazonaws.com/$ECR_REPOSITORY:${{ steps.vars.outputs.IMAGE_TAG }}"
+          echo "Using image: $NEW_IMAGE"
+
+          # Update container image in task-def.json (assumes container name is 'web')
+          python - << 'EOF'
+          import json
+          import os
+
+          path = "task-def.json"
+          with open(path) as f:
+              td = json.load(f)
+
+          new_image = os.environ["NEW_IMAGE"]
+
+          for container in td["containerDefinitions"]:
+              if container["name"] == "web":
+                  container["image"] = new_image
+
+          # Clean up fields that cannot be passed to register-task-definition
+          for key in ["taskDefinitionArn", "revision", "status", "requiresAttributes", "compatibilities", "registeredBy", "registeredAt"]:
+              td.pop(key, None)
+
+          with open("task-def-updated.json", "w") as f:
+              json.dump(td, f)
+          EOF
+
+          aws ecs register-task-definition \
+            --cli-input-json file://task-def-updated.json \
+            --query "taskDefinition.taskDefinitionArn" \
+            --output text > new-task-def-arn.txt
+
+        env:
+          NEW_IMAGE: ${{ env.AWS_ACCOUNT_ID }}.dkr.ecr.${{ env.AWS_REGION }}.amazonaws.com/${{ env.ECR_REPOSITORY }}:${{ steps.vars.outputs.IMAGE_TAG }}
+
+      - name: Update ECS service to use new task definition
+        run: |
+          NEW_TASK_DEF_ARN=$(cat new-task-def-arn.txt)
+          echo "Updating service to use task def: $NEW_TASK_DEF_ARN"
+
+          aws ecs update-service \
+            --cluster $ECS_CLUSTER \
+            --service $ECS_SERVICE \
+            --task-definition $NEW_TASK_DEF_ARN \
+            --force-new-deployment
