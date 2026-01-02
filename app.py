@@ -9,7 +9,7 @@ def hello():
     hostname = socket.gethostname()
     return f"""
     <html>
-      <head><title>Lab 24 – GitHub Actions CD: ECS Rolling & Blue/Green</title></head>
+      <head><title>Lab 24 GitHub Actions CD: ECS Rolling & Blue/Green</title></head>
       <body>
         <h1>DevOps Easy Learning - Lab 21</h1>
         <p>This response is served from container: {hostname}</p>
